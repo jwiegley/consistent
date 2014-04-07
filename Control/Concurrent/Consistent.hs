@@ -22,15 +22,6 @@ import Data.HashMap.Strict as Map
 import Data.Maybe
 import Prelude
 
-data CVar a = CVar
-    { cvVars    :: TVar (HashMap ThreadId (TVar a, TVar Int))
-      -- ^ The @TVar Int@ in cvVars is the cvCurrGen from each CVar.
-    , cvMyVar   :: TVar a
-    , cvBaseGen :: TVar Int
-    , cvCurrGen :: TVar Int
-    , cvOwner   :: ThreadId
-    }
-
 data ConsistentState = ConsistentState
     { csActiveThreads :: TVar Int
     , csJournal       :: TQueue [STM (Maybe (STM ()))]
@@ -63,35 +54,18 @@ runConsistently action = do
         $ \worker -> do
             link worker
             runConsistentT action
+  where
+    applyChanges ConsistentState {..} = forever $ atomically $ do
+        -- Process only if no threads are in a "consistently" block.
+        active <- readTVar csActiveThreads
+        check (active == 0)
 
-newCVar :: MonadIO m => a -> m (CVar a)
-newCVar a = liftIO $ do
-    me   <- newTVarIO a
-    bgen <- newTVarIO 0
-    cgen <- newTVarIO 0
-    tid  <- myThreadId
-    vars <- newTVarIO (Map.singleton tid (me, cgen))
-    return $ CVar vars me bgen cgen tid
+        -- Read the next set of updates to apply.
+        updates <- sequence =<< readTQueue csJournal
 
-dupCVar :: MonadIO m => CVar a -> m (CVar a)
-dupCVar cv@(CVar vs v _ _ owner) = liftIO $ do
-    tid <- myThreadId
-    if tid == owner
-        then return cv
-        else atomically $ do
-            me   <- newTVar =<< readTVar v
-            bgen <- newTVar 0
-            cgen <- newTVar 0
-            modifyTVar' vs (Map.insert tid (me, cgen))
-            return $ CVar vs me bgen cgen tid
-
-readCVar :: MonadIO m => CVar a -> m a
-readCVar (CVar _ me _ _ _) = liftIO $ readTVarIO me
-
-writeCVar :: (MonadIO m, Show a) => CVar a -> a -> CTMT m ()
-writeCVar cv@(CVar _ me _ _ _) a = do
-    liftIO $ atomically $ writeTVar me a
-    CTMT $ tell [postUpdate cv a]
+        -- If any component of the update fails the generational check (see
+        -- 'postUpdate'), drop the update for consistency's sake.
+        when (all isJust updates) $ sequence_ (catMaybes updates)
 
 consistently :: (MonadBaseControl IO m, MonadIO m)
            => CTMT m a -> ConsistentT m a
@@ -103,46 +77,74 @@ consistently (CTMT f) = do
         liftIO $ atomically $ writeTQueue csJournal updates
         return a
 
-postUpdate :: Show a => CVar a -> a -> STM (Maybe (STM ()))
-postUpdate (CVar vs _ bgen cgen _) val = do
-    -- Get the base generation for this CVar, or what we last knew it to be,
-    -- and the current generation, which can be updated by other threads if
-    -- their updates succeed.
-    base <- readTVar bgen
-    curr <- readTVar cgen
+data CVar a = CVar
+    { cvVars    :: TVar (HashMap ThreadId (TVar a, TVar Int))
+      -- ^ The @TVar Int@ in cvVars is the cvCurrGen from each CVar.
+    , cvMyVar   :: TVar a
+    , cvBaseGen :: TVar Int
+    , cvCurrGen :: TVar Int
+    }
 
-    -- If base is not the same as curr, another thread has changed the CVar, and
-    -- so any changes in the current consistent block are now invalid.  Return
-    -- Nothing so that 'applyChanges' throws them away.
-    return $
-        if base /= curr
-        then Nothing
-        else Just $ do
-            -- Otherwise, move on to the next generation...
-            let next = succ base
-            writeTVar bgen next
-            writeTVar cgen next
+newCVar :: MonadIO m => a -> m (CVar a)
+newCVar a = liftIO $ do
+    me   <- newTVarIO a
+    bgen <- newTVarIO 0
+    cgen <- newTVarIO 0
+    tid  <- myThreadId
+    vars <- newTVarIO (Map.singleton tid (me, cgen))
+    return $ CVar vars me bgen cgen
 
-            -- Update every thread with the new value and generation.  This
-            -- causes pending updates in other threads involving the same
-            -- variable to become invalid.
-            -- jww (2014-04-07): Performance issue: Multiple calls to
-            -- writeCVar from the same block will cause this loop to execute
-            -- that many times.
-            vars <- Map.elems <$> readTVar vs
-            forM_ vars $ \(o, ogen) -> do
-                writeTVar o val
-                writeTVar ogen next
+dupCVar :: MonadIO m => CVar a -> m (CVar a)
+dupCVar (CVar vs v _ _) = liftIO $ do
+    tid <- myThreadId
+    atomically $ do
+        me   <- newTVar =<< readTVar v
+        bgen <- newTVar 0
+        cgen <- newTVar 0
+        modifyTVar' vs (Map.insert tid (me, cgen))
+        return $ CVar vs me bgen cgen
 
-applyChanges :: ConsistentState -> IO b
-applyChanges ConsistentState {..} = forever $ atomically $ do
-    -- Process updates only when no threads are in a "consistently" block.
-    active <- readTVar csActiveThreads
-    check (active == 0)
+readCVar :: MonadIO m => CVar a -> m a
+readCVar = liftIO . readTVarIO . cvMyVar
 
-    -- Read the next set of updates to apply.
-    updates <- sequence =<< readTQueue csJournal
+writeCVar :: MonadIO m => CVar a -> a -> CTMT m ()
+writeCVar  (CVar vs me bgen cgen) a = do
+    liftIO $ atomically $ writeTVar me a
+    CTMT $ tell [postUpdate]
+  where
+    postUpdate = do
+        -- Get the base generation for this CVar, or what we last knew it to
+        -- be, and the current generation, which can be updated by other
+        -- threads if their updates succeed.
+        base <- readTVar bgen
+        curr <- readTVar cgen
 
-    -- If any component of the update fails the generational check (see
-    -- 'postUpdate'), drop the update for consistency's sake.
-    when (all isJust updates) $ sequence_ (catMaybes updates)
+        -- If base is not the same as curr, another thread has changed the CVar,
+        -- and so any changes in the current consistent block are now invalid.
+        -- Return Nothing so that 'applyChanges' throws them away.
+        return $
+            if base /= curr
+            then Nothing
+            else Just $ do
+                -- Otherwise, move on to the next generation...
+                let next = succ base
+                writeTVar bgen next
+                writeTVar cgen next
+
+                -- Update every thread with the new value and generation.
+                -- This causes pending updates in other threads involving the
+                -- same variable to become invalid.
+                vars <- Map.elems <$> readTVar vs
+                forM_ vars $ \(o, ogen) -> do
+                    writeTVar o a
+                    writeTVar ogen next
+
+                -- jww (2014-04-07): Performance issue: Multiple calls to
+                -- writeCVar from the same block will cause this loop to
+                -- execute that many times.
+
+data CQueue a = CQueue
+    { cqVars  :: TVar (HashMap ThreadId (TQueue a))
+    , cqMyVar :: TQueue a
+    , cqOwner :: ThreadId
+    }
