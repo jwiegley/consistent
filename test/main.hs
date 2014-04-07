@@ -3,15 +3,16 @@ module Main where
 import Control.Concurrent
 import Control.Concurrent.Async.Lifted
 import Control.Concurrent.Consistent
-import Control.Exception
+-- import Control.Exception
 import Control.Monad hiding (forM_, mapM_)
 import Control.Monad.IO.Class
+import Debug.Trace
 import Prelude hiding (log)
 import Prelude hiding (log, mapM_)
 --import Test.Hspec
 
-tryAny :: IO a -> IO (Either SomeException a)
-tryAny = try
+-- tryAny :: IO a -> IO (Either SomeException a)
+-- tryAny = try
 
 -- main :: IO ()
 -- main = hspec $ do
@@ -19,31 +20,22 @@ tryAny = try
 --         it "logs output" $ True `shouldBe` True
 
 main :: IO ()
-main = runConsistently $ do
-    v <- newCVar (10 :: Int)
-    u <- newCVar (20 :: Int)
-    withAsync (worker v u) $ \thread -> do
-        replicateM_ 30 $ do
-            liftIO $ print "parent before"
-            consistently $ do
-                x <- readCVar v
-                writeCVar u 100
-                writeCVar v 300
-                liftIO $ print $ "parent: " ++ show x
-            liftIO $ print "parent end"
-            liftIO $ threadDelay 50000
-        wait thread
-    liftIO $ print "exiting!"
+main = do
+    test <- async $ void $ runConsistently $ do
+        u <- newCVar 0
+        v <- newCVar 0
+        mapConcurrently worker $
+            flip map [1..100 :: Int] $ \i -> (u, v, i)
+    wait test
   where
-    worker pv pu = do
-        v <- dupCVar pv
+    worker (pu, pv, i) = do
         u <- dupCVar pu
-        liftIO $ threadDelay 100000
-        replicateM_ 30 $ do
-            liftIO $ print "child before"
+        v <- dupCVar pv
+        replicateM_ 100 $ do
             consistently $ do
                 x <- readCVar u
-                writeCVar v 200
-                liftIO $ print $ "child: " ++ show x
-            liftIO $ print "child before"
-            liftIO $ threadDelay 400000
+                writeCVar u i
+                y <- readCVar v
+                writeCVar v i
+                trace (show (x, y)) $ return ()
+            liftIO $ threadDelay (i * 1000)
