@@ -2,7 +2,7 @@ module Main where
 
 import Control.Concurrent
 import Control.Concurrent.Async.Lifted
-import Control.Concurrent.Coherent
+import Control.Concurrent.Consistent
 import Control.Exception
 import Control.Monad hiding (forM_, mapM_)
 import Control.Monad.IO.Class
@@ -19,13 +19,13 @@ tryAny = try
 --         it "logs output" $ True `shouldBe` True
 
 main :: IO ()
-main = runCoherently $ do
+main = runConsistently $ do
     v <- newCVar (10 :: Int)
     u <- newCVar (20 :: Int)
     withAsync (worker v u) $ \thread -> do
         replicateM_ 30 $ do
             liftIO $ print "parent before"
-            coherently $ do
+            consistently $ do
                 x <- readCVar v
                 writeCVar u 100
                 writeCVar v 300
@@ -41,7 +41,7 @@ main = runCoherently $ do
         liftIO $ threadDelay 100000
         replicateM_ 30 $ do
             liftIO $ print "child before"
-            coherently $ do
+            consistently $ do
                 x <- readCVar u
                 writeCVar v 200
                 liftIO $ print $ "child: " ++ show x

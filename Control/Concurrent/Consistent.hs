@@ -5,7 +5,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Control.Concurrent.Coherent where
+module Control.Concurrent.Consistent where
 
 import Control.Applicative
 import Control.Concurrent
@@ -26,35 +26,35 @@ data CVar a = CVar
     , cvModified :: TVar (Maybe ThreadId)
     }
 
-data CoherenceState = CoherenceState
-    { csJournal    :: TQueue (STM ())
-    , csSyncVar    :: TVar Bool
+data ConsistentState = ConsistentState
+    { csJournal       :: TQueue (STM ())
+    , csActiveThreads :: TVar Int
     }
 
-newtype CoherenceT m a = CoherenceT
-    { runCoherenceT :: ReaderT CoherenceState m a }
+newtype ConsistentT m a = ConsistentT
+    { runConsistentT :: ReaderT ConsistentState m a }
     deriving (Functor, Applicative, Monad, MonadIO)
 
-instance MonadBase IO m => MonadBase IO (CoherenceT m) where
-    liftBase b = CoherenceT $ liftBase b
+instance MonadBase IO m => MonadBase IO (ConsistentT m) where
+    liftBase b = ConsistentT $ liftBase b
 
-instance MonadBaseControl IO m => MonadBaseControl IO (CoherenceT m) where
-    newtype StM (CoherenceT m) a =
-        StMCoherenceT (StM (ReaderT CoherenceState m) a)
+instance MonadBaseControl IO m => MonadBaseControl IO (ConsistentT m) where
+    newtype StM (ConsistentT m) a =
+        StMConsistentT (StM (ReaderT ConsistentState m) a)
     liftBaseWith f =
-        CoherenceT $ liftBaseWith $ \runInBase -> f $ \k ->
-            liftM StMCoherenceT $ runInBase $ runCoherenceT k
-    restoreM (StMCoherenceT m) = CoherenceT . restoreM $ m
+        ConsistentT $ liftBaseWith $ \runInBase -> f $ \k ->
+            liftM StMConsistentT $ runInBase $ runConsistentT k
+    restoreM (StMConsistentT m) = ConsistentT . restoreM $ m
 
-runCoherently :: (MonadBaseControl IO m, MonadIO m) => CoherenceT m a -> m a
-runCoherently action = do
-    cs <- liftIO $ CoherenceState <$> newTQueueIO <*> newTVarIO False
+runConsistently :: (MonadBaseControl IO m, MonadIO m) => ConsistentT m a -> m a
+runConsistently action = do
+    cs <- liftIO $ ConsistentState <$> newTQueueIO <*> newTVarIO 0
     flip runReaderT cs $ withAsync (liftIO (applyChanges cs)) $ \worker ->
-        link worker >> runCoherenceT action
+        link worker >> runConsistentT action
   where
-    applyChanges CoherenceState {..} = forever $ atomically $ do
-        sv <- readTVar csSyncVar
-        check (not sv)
+    applyChanges ConsistentState {..} = forever $ atomically $ do
+        active <- readTVar csActiveThreads
+        check (active == 0)
         mt <- isEmptyTQueue csJournal
         check (not mt)
 
@@ -64,8 +64,8 @@ runCoherently action = do
             mt' <- isEmptyTQueue csJournal
             unless mt' $ join $ readTQueue csJournal
 
-newCVar :: MonadIO m => a -> CoherenceT m (CVar a)
-newCVar a = CoherenceT $ liftIO $ do
+newCVar :: MonadIO m => a -> ConsistentT m (CVar a)
+newCVar a = ConsistentT $ liftIO $ do
     tid <- myThreadId
     atomically $ do
         me <- newTVar a
@@ -73,27 +73,27 @@ newCVar a = CoherenceT $ liftIO $ do
              <*> pure me
              <*> newTVar Nothing
 
-dupCVar :: MonadIO m => CVar a -> CoherenceT m (CVar a)
-dupCVar (CVar vs v vmod) = CoherenceT $ liftIO $ do
+dupCVar :: MonadIO m => CVar a -> ConsistentT m (CVar a)
+dupCVar (CVar vs v vmod) = ConsistentT $ liftIO $ do
     tid <- myThreadId
     atomically $ do
         me <- newTVar =<< readTVar v
         modifyTVar vs (Map.insert tid me)
         return $ CVar vs me vmod
 
-readCVar :: MonadIO m => CVar a -> CoherenceT m a
-readCVar (CVar _ me _) = CoherenceT $ liftIO $ readTVarIO me
+readCVar :: MonadIO m => CVar a -> ConsistentT m a
+readCVar (CVar _ me _) = ConsistentT $ liftIO $ readTVarIO me
 
-writeCVar :: MonadIO m => CVar a -> a -> CoherenceT m ()
-writeCVar (CVar vs me vmod) a = CoherenceT $ do
-    CoherenceState {..} <- ask
+writeCVar :: MonadIO m => CVar a -> a -> ConsistentT m ()
+writeCVar (CVar vs me vmod) a = ConsistentT $ do
+    ConsistentState {..} <- ask
     liftIO $ do
         tid <- myThreadId
         atomically $ do
             m <- readTVar vmod
             case m of
                 Just other | other /= tid ->
-                    error "Modified CVar in multiple coherent blocks"
+                    error "Modified CVar in multiple consistent blocks"
                 _ -> update tid csJournal
   where
     update tid csJournal = do
@@ -109,10 +109,10 @@ writeCVar (CVar vs me vmod) a = CoherenceT $ do
                 =<< readTVar vs
             writeTVar vmod Nothing
 
-coherently :: (MonadBaseControl IO m, MonadIO m)
-           => CoherenceT m a -> CoherenceT m a
-coherently (CoherenceT f) = CoherenceT $ do
-    CoherenceState {..} <- ask
+consistently :: (MonadBaseControl IO m, MonadIO m)
+           => ConsistentT m a -> ConsistentT m a
+consistently (ConsistentT f) = ConsistentT $ do
+    ConsistentState {..} <- ask
     bracket_
-        (liftIO $ atomically $ writeTVar csSyncVar True)
-        (liftIO $ atomically $ writeTVar csSyncVar False) f
+        (liftIO $ atomically $ modifyTVar csActiveThreads succ)
+        (liftIO $ atomically $ modifyTVar csActiveThreads pred) f
