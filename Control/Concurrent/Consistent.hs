@@ -5,7 +5,17 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Control.Concurrent.Consistent where
+module Control.Concurrent.Consistent
+    ( ConsistentT
+    , CTMT
+    , runConsistentT
+    , consistently
+    , CVar
+    , newCVar
+    , dupCVar
+    , readCVar
+    , writeCVar
+    ) where
 
 import Control.Applicative
 import Control.Concurrent
@@ -143,8 +153,8 @@ writeCVar  (CVar vs me bgen cgen) a = do
                 -- writeCVar from the same block will cause this loop to
                 -- execute that many times.
 
-data CQueue a = CQueue
-    { cqVars  :: TVar (HashMap ThreadId (TQueue a))
-    , cqMyVar :: TQueue a
-    , cqOwner :: ThreadId
-    }
+-- data CQueue a = CQueue
+--     { cqVars  :: TVar (HashMap ThreadId (TQueue a))
+--     , cqMyVar :: TQueue a
+--     , cqOwner :: ThreadId
+--     }
