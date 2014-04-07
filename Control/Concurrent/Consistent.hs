@@ -5,6 +5,8 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeFamilies #-}
 
+{-# OPTIONS_GHC -fno-warn-unused-binds #-}
+
 module Control.Concurrent.Consistent
     ( ConsistentT
     , CTMT
@@ -88,52 +90,43 @@ consistently (CTMT f) = do
         liftIO $ atomically $ writeTQueue csJournal updates
         return a
 
-data ConsistentData a = ConsistentData
-    { cdVars    :: TVar (HashMap ThreadId (a, TVar Int))
-      -- ^ The @TVar Int@ in cdVars is the cdCurrGen from each
-      -- 'ConsistentData' value.
-    , cdMyData  :: a
+data CVar a = CVar
+    { cdVars    :: TVar (HashMap ThreadId (TVar a, TVar Int))
+      -- ^ The @TVar Int@ in cdVars is cvCurrGen from each thread's CVar.
+    , cvMyData  :: TVar a
     , cdBaseGen :: TVar Int
     , cdCurrGen :: TVar Int
     }
 
-newtype CVar a = CVar { getCVar :: ConsistentData (TVar a) }
-
-newCData :: MonadIO m => a -> (a -> IO v) -> m (ConsistentData v)
-newCData a f = liftIO $ do
-    me   <- f a
+newCVar :: MonadIO m => a -> m (CVar a)
+newCVar a = liftIO $ do
+    me   <- newTVarIO a
     bgen <- newTVarIO 0
     cgen <- newTVarIO 0
     tid  <- myThreadId
     vars <- newTVarIO (Map.singleton tid (me, cgen))
-    return $ ConsistentData vars me bgen cgen
+    return $ CVar vars me bgen cgen
 
-dupCData :: MonadIO m => ConsistentData v -> (v -> STM v) -> m (ConsistentData v)
-dupCData (ConsistentData vs v _ _) f = liftIO $ do
+dupCVar :: MonadIO m => CVar a -> m (CVar a)
+dupCVar (CVar vs v _ _) = liftIO $ do
     tid <- myThreadId
     atomically $ do
-        me   <- f v
+        me   <- newTVar =<< readTVar v
         bgen <- newTVar 0
         cgen <- newTVar 0
         modifyTVar' vs (Map.insert tid (me, cgen))
-        return $ ConsistentData vs me bgen cgen
-
-newCVar :: MonadIO m => a -> m (CVar a)
-newCVar a = CVar `liftM` newCData a newTVarIO
-
-dupCVar :: MonadIO m => CVar a -> m (CVar a)
-dupCVar (CVar cd) = CVar `liftM` dupCData cd (newTVar <=< readTVar)
+        return $ CVar vs me bgen cgen
 
 readCVar :: MonadIO m => CVar a -> m a
-readCVar = liftIO . readTVarIO . cdMyData . getCVar
+readCVar = liftIO . readTVarIO . cvMyData
 
 writeCVar :: MonadIO m => CVar a -> a -> CTMT m ()
-writeCVar  (CVar cd) a = do
-    liftIO $ atomically $ writeTVar (cdMyData cd) a
-    CTMT $ tell [updateData cd writeTVar a]
+writeCVar v a = do
+    liftIO $ atomically $ writeTVar (cvMyData v) a
+    CTMT $ tell [updateData v a]
 
-updateData :: ConsistentData v -> (v -> a -> STM ()) -> a -> STM (Maybe (STM ()))
-updateData (ConsistentData vs _ bgen cgen) write a = do
+updateData :: CVar a -> a -> STM (Maybe (STM ()))
+updateData (CVar vs _ bgen cgen) a = do
     -- Get the base generation for this CVar, or what we last knew it to
     -- be, and the current generation, which can be updated by other
     -- threads if their updates succeed.
@@ -157,7 +150,7 @@ updateData (ConsistentData vs _ bgen cgen) write a = do
             -- same variable to become invalid.
             vars <- Map.elems <$> readTVar vs
             forM_ vars $ \(o, ogen) -> do
-                write o a
+                writeTVar o a
                 writeTVar ogen next
 
             -- jww (2014-04-07): Performance issue: Multiple calls to
@@ -172,19 +165,3 @@ swapCVar v y = do
 
 modifyCVar :: MonadIO m => CVar a -> (a -> a) -> CTMT m ()
 modifyCVar v f = writeCVar v . f =<< readCVar v
-
--- newtype CQueue a = CQueue { getCQueue :: ConsistentData (TQueue a) }
-
--- newCQueue :: MonadIO m => m (CQueue a)
--- newCQueue = CQueue `liftM` newCData (error "unused") (const newTQueueIO)
-
--- dupCQueue :: MonadIO m => CQueue a -> m (CQueue a)
--- dupCQueue (CQueue cd) = CQueue `liftM` dupCData cd (newTVar <=< readTVar)
-
--- readCQueue :: MonadIO m => CQueue a -> m a
--- readCQueue = liftIO . atomically . readTQueue . cdMyData . getCQueue
-
--- writeCQueue :: MonadIO m => CQueue a -> a -> CTMT m ()
--- writeCQueue  (CQueue cd) a = do
---     liftIO $ atomically $ writeTQueue (cdMyData cd) a
---     CTMT $ tell [updateData cd writeTQueue a]

@@ -21,7 +21,7 @@ import Prelude hiding (log, mapM_)
 
 main :: IO ()
 main = do
-    test <- async $ void $ runConsistently $ do
+    test <- async $ void $ runConsistentT $ do
         u <- newCVar 0
         v <- newCVar 0
         mapConcurrently worker $
