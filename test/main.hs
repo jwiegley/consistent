@@ -1,32 +1,49 @@
 module Main where
 
 import Control.Concurrent
+import Control.Concurrent.Async.Lifted
+import Control.Concurrent.Coherent
 import Control.Exception
-import Control.Logging
-import Control.Monad.Logger
+import Control.Monad hiding (forM_, mapM_)
+import Control.Monad.IO.Class
 import Prelude hiding (log)
-import Test.Hspec
+import Prelude hiding (log, mapM_)
+--import Test.Hspec
 
 tryAny :: IO a -> IO (Either SomeException a)
 tryAny = try
 
+-- main :: IO ()
+-- main = hspec $ do
+--     describe "simple logging" $ do
+--         it "logs output" $ True `shouldBe` True
+
 main :: IO ()
-main = hspec $ do
-    describe "simple logging" $ do
-        it "logs output" $ (withStdoutLogging :: IO () -> IO ())  $ do
-            log "Hello, world!"
-            timedLog "Did a good thing" $ threadDelay 100000
-            _ <- tryAny $ timedLog "Did a bad thing" $
-                threadDelay 100000 >> error "foo"
-            _ <- tryAny $ errorL "Uh oh"
-            return ()
-
-        it "can be passed to runLoggingT" $ do
-            flip runLoggingT loggingLogger (log "Hello" :: LoggingT IO ())
-            flushLog
-
-        it "supports using debug classes" $ do
-            setDebugSourceRegex "foo\\..*"
-            withStdoutLogging $ do
-                debugS "foo" "This is a foo message"
-                debugS "foo.bar" "This is a foo.bar message"
+main = runCoherently $ do
+    v <- newCVar (10 :: Int)
+    u <- newCVar (20 :: Int)
+    withAsync (worker v u) $ \thread -> do
+        replicateM_ 30 $ do
+            liftIO $ print "parent before"
+            coherently $ do
+                x <- readCVar v
+                writeCVar u 100
+                writeCVar v 300
+                liftIO $ print $ "parent: " ++ show x
+            liftIO $ print "parent end"
+            liftIO $ threadDelay 50000
+        wait thread
+    liftIO $ print "exiting!"
+  where
+    worker pv pu = do
+        v <- dupCVar pv
+        u <- dupCVar pu
+        liftIO $ threadDelay 100000
+        replicateM_ 30 $ do
+            liftIO $ print "child before"
+            coherently $ do
+                x <- readCVar u
+                writeCVar v 200
+                liftIO $ print $ "child: " ++ show x
+            liftIO $ print "child before"
+            liftIO $ threadDelay 400000

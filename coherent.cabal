@@ -1,0 +1,43 @@
+Name:                coherent
+Version:             0.0.1
+Synopsis:            Eventually consistent STM transactions.
+License-file:        LICENSE
+License:             MIT
+Author:              John Wiegley
+Maintainer:          johnw@newartisans.com
+Build-Type:          Simple
+Cabal-Version:       >=1.10
+Category:            System
+Description:
+  Eventually consistent STM transactions.
+
+Source-repository head
+  type: git
+  location: git://github.com/jwiegley/coherent.git
+
+Library
+    default-language:   Haskell98
+    ghc-options: -Wall
+    build-depends:
+        base                 >= 3 && < 5
+      , monad-control        >= 0.3.2.3
+      , transformers         >= 0.3.0.0
+      , transformers-base    >= 0.4.1
+      , lifted-base          >= 0.2.2.0
+      , lifted-async         >= 0.1.1
+      , unordered-containers >= 0.2.3.0
+      , stm                  >= 2.4.2
+    exposed-modules:
+        Control.Concurrent.Coherent
+
+test-suite test
+    hs-source-dirs: test
+    default-language: Haskell2010
+    main-is: main.hs
+    type: exitcode-stdio-1.0
+    ghc-options: -Wall -threaded
+    build-depends:
+        base
+      , coherent
+      , transformers         >= 0.3.0.0
+      , lifted-async         >= 0.1.1

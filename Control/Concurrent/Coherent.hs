@@ -1,11 +1,11 @@
-{-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeFamilies #-}
 
-module Control.Concurrent.Coherence where
+module Control.Concurrent.Coherent where
 
 import Control.Applicative
 import Control.Concurrent
@@ -15,9 +15,8 @@ import Control.Exception.Lifted (bracket_)
 import Control.Monad hiding (forM_, mapM_)
 import Control.Monad.Base
 import Control.Monad.IO.Class
-import Control.Monad.Reader.Class
 import Control.Monad.Trans.Control
-import Control.Monad.Trans.Reader (ReaderT(..), runReaderT)
+import Control.Monad.Trans.Reader
 import Data.HashMap.Strict as Map
 import Prelude hiding (log, mapM_)
 
@@ -49,28 +48,21 @@ instance MonadBaseControl IO m => MonadBaseControl IO (CoherenceT m) where
 
 runCoherently :: (MonadBaseControl IO m, MonadIO m) => CoherenceT m a -> m a
 runCoherently action = do
-    cs <- liftIO $ do
-        m  <- newTQueueIO
-        v  <- newTVarIO False
-        return $ CoherenceState m v
-
-    flip runReaderT cs $ withAsync applyChanges $ \worker -> do
-        link worker
-        runCoherenceT action
+    cs <- liftIO $ CoherenceState <$> newTQueueIO <*> newTVarIO False
+    flip runReaderT cs $ withAsync (liftIO (applyChanges cs)) $ \worker ->
+        link worker >> runCoherenceT action
   where
-    applyChanges = do
-        CoherenceState {..} <- ask
-        liftIO $ forever $ atomically $ do
-            sv <- readTVar csSyncVar
-            check (not sv)
-            mt <- isEmptyTQueue csJournal
-            check (not mt)
+    applyChanges CoherenceState {..} = forever $ atomically $ do
+        sv <- readTVar csSyncVar
+        check (not sv)
+        mt <- isEmptyTQueue csJournal
+        check (not mt)
 
-            -- Only process 10 actions from the queue at a time, to make sure
-            -- we don't try to do too much and end up getting starved.
-            replicateM_ 10 $ do
-                mt' <- isEmptyTQueue csJournal
-                unless mt' $ join $ readTQueue csJournal
+        -- Only process 10 actions from the queue at a time, to make sure
+        -- we don't try to do too much and end up getting starved.
+        replicateM_ 10 $ do
+            mt' <- isEmptyTQueue csJournal
+            unless mt' $ join $ readTQueue csJournal
 
 newCVar :: MonadIO m => a -> CoherenceT m (CVar a)
 newCVar a = CoherenceT $ liftIO $ do
@@ -85,8 +77,7 @@ dupCVar :: MonadIO m => CVar a -> CoherenceT m (CVar a)
 dupCVar (CVar vs v vmod) = CoherenceT $ liftIO $ do
     tid <- myThreadId
     atomically $ do
-        a  <- readTVar v
-        me <- newTVar a
+        me <- newTVar =<< readTVar v
         modifyTVar vs (Map.insert tid me)
         return $ CVar vs me vmod
 
@@ -102,20 +93,21 @@ writeCVar (CVar vs me vmod) a = CoherenceT $ do
             m <- readTVar vmod
             case m of
                 Just other | other /= tid ->
-                    error "Modified the same CVar in multiple coherent blocks"
-                _ -> do
-                    writeTVar me a
-                    writeTVar vmod (Just tid)
-                    writeTQueue csJournal (apply tid)
+                    error "Modified CVar in multiple coherent blocks"
+                _ -> update tid csJournal
   where
-    apply tid = do
-        val <- readTVar me
-        foldlWithKey'
-            (\f other o ->
-              f >> unless (other == tid) (writeTVar o val))
-            (return ())
-            =<< readTVar vs
-        writeTVar vmod Nothing
+    update tid csJournal = do
+        writeTVar me a
+        writeTVar vmod (Just tid)
+        writeTQueue csJournal $ do
+            val <- readTVar me
+            foldlWithKey'
+                (\f other o -> if other == tid
+                               then f
+                               else f >> writeTVar o val)
+                (return ())
+                =<< readTVar vs
+            writeTVar vmod Nothing
 
 coherently :: (MonadBaseControl IO m, MonadIO m)
            => CoherenceT m a -> CoherenceT m a
@@ -124,33 +116,3 @@ coherently (CoherenceT f) = CoherenceT $ do
     bracket_
         (liftIO $ atomically $ writeTVar csSyncVar True)
         (liftIO $ atomically $ writeTVar csSyncVar False) f
-
-main :: IO ()
-main = runCoherently $ do
-    v <- newCVar (10 :: Int)
-    u <- newCVar (20 :: Int)
-    withAsync (worker v u) $ \thread -> do
-        replicateM_ 30 $ do
-            liftIO $ print "parent before"
-            coherently $ do
-                x <- readCVar v
-                writeCVar u 100
-                writeCVar v 300
-                liftIO $ print $ "parent: " ++ show x
-            liftIO $ print "parent end"
-            liftIO $ threadDelay 50000
-        wait thread
-    liftIO $ print "exiting!"
-  where
-    worker pv pu = do
-        v <- dupCVar pv
-        u <- dupCVar pu
-        liftIO $ threadDelay 100000
-        replicateM_ 30 $ do
-            liftIO $ print "child before"
-            coherently $ do
-                x <- readCVar u
-                writeCVar v 200
-                liftIO $ print $ "child: " ++ show x
-            liftIO $ print "child before"
-            liftIO $ threadDelay 450000
