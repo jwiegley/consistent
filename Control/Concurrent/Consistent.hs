@@ -4,6 +4,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 {-# OPTIONS_GHC -fno-warn-unused-binds #-}
 
@@ -49,12 +50,11 @@ instance MonadBase IO m => MonadBase IO (ConsistentT m) where
     liftBase b = ConsistentT $ liftBase b
 
 instance MonadBaseControl IO m => MonadBaseControl IO (ConsistentT m) where
-    newtype StM (ConsistentT m) a =
-        StMConsistentT (StM (ReaderT ConsistentState m) a)
-    liftBaseWith f =
-        ConsistentT $ liftBaseWith $ \runInBase -> f $ \k ->
-            liftM StMConsistentT $ runInBase $ getConsistentT k
-    restoreM (StMConsistentT m) = ConsistentT . restoreM $ m
+    type StM (ConsistentT m) a =
+        StM (ReaderT ConsistentState m) a
+    liftBaseWith f = ConsistentT $ liftBaseWith $ \runInBase ->
+        f $ \k -> runInBase $ getConsistentT k
+    restoreM = ConsistentT . restoreM
 
 newtype CTMT m a = CTMT (WriterT [STM (Maybe (STM ()))] (ConsistentT m) a)
     deriving (Functor, Applicative, Monad, MonadIO)

@@ -1,19 +1,16 @@
-{ cabal, monadControl, transformers, transformersBase
-, liftedBase, liftedAsync, unorderedContainers, stm
+{ mkDerivation, base, lifted-async, lifted-base, monad-control
+, stdenv, stm, transformers, transformers-base
+, unordered-containers
 }:
-
-cabal.mkDerivation (self: {
+mkDerivation {
   pname = "consistent";
   version = "0.0.1";
   src = ./.;
-  buildDepends = [
-    monadControl transformers transformersBase liftedBase liftedAsync
-    unorderedContainers stm
+  libraryHaskellDepends = [
+    base lifted-async lifted-base monad-control stm transformers
+    transformers-base unordered-containers
   ];
-  testDepends = [ transformers liftedAsync ];
-  meta = {
-    description = "Eventually consistent STM transactions";
-    license = self.stdenv.lib.licenses.mit;
-    platforms = self.ghc.meta.platforms;
-  };
-})
+  testHaskellDepends = [ base lifted-async transformers ];
+  description = "Eventually consistent STM transactions";
+  license = stdenv.lib.licenses.mit;
+}

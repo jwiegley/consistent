@@ -1,5 +1,5 @@
 Name:                consistent
-Version:             0.0.1
+Version:             0.1.0
 Synopsis:            Eventually consistent STM transactions.
 License-file:        LICENSE
 License:             MIT
@@ -26,10 +26,10 @@ Library
     default-language:   Haskell98
     ghc-options: -Wall
     build-depends:
-        base                 >= 3 && < 5
-      , monad-control        >= 0.3.2.3
-      , transformers         >= 0.3.0.0
-      , transformers-base    >= 0.4.1
+        base                 >= 4.9 && < 4.10
+      , monad-control        >= 1.0.1
+      , transformers         >= 0.5
+      , transformers-base    >= 0.4
       , lifted-base          >= 0.2.2.0
       , lifted-async         >= 0.1.1
       , unordered-containers >= 0.2.3.0
@@ -46,5 +46,5 @@ test-suite test
     build-depends:
         base
       , consistent
-      , transformers         >= 0.3.0.0
+      , transformers         >= 0.4
       , lifted-async         >= 0.1.1
